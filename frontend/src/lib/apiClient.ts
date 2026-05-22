@@ -21,7 +21,16 @@ export interface Session {
 
 type AuthChangeListener = (event: string, session: Session | null) => void;
 
-const API_BASE_URL = 'http://localhost:5000/api';
+const getApiBaseUrl = () => {
+  try {
+    // eslint-disable-next-line no-eval
+    const meta = eval('import.meta');
+    return meta.env?.VITE_API_BASE_URL || 'http://localhost:5000/api';
+  } catch (e) {
+    return 'http://localhost:5000/api';
+  }
+};
+const API_BASE_URL = getApiBaseUrl();
 const TOKEN_KEY = 'sage_wealth_jwt';
 const USER_KEY = 'sage_wealth_user';
 
