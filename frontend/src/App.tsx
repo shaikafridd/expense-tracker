@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import type { User } from '@supabase/supabase-js';
+import type { User } from './lib/apiClient';
 import {
   Plus, Target, Wallet, TrendingUp, Zap,
   AlertTriangle, Calendar, BarChart2,

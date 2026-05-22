@@ -1,13 +1,14 @@
 /**
  * expenseApi.ts
  * ─────────────────────────────────────────────────────────────────
- *  Smart data layer: routes to Supabase when credentials are
- *  configured, otherwise falls back to LocalStorage (demo mode).
+ *  Smart data layer: routes to Express/MongoDB backend when authenticated,
+ *  otherwise falls back to LocalStorage (demo mode).
  *  The caller never needs to know which backend is active.
  * ─────────────────────────────────────────────────────────────────
  */
 
-import { supabase, IS_CONFIGURED } from './supabaseClient';
+import { IS_CONFIGURED } from './supabaseClient';
+import { apiFetch, auth } from './apiClient';
 import type { Category } from '../types';
 
 /* ── Shared types ────────────────────────────────────────────── */
@@ -54,20 +55,7 @@ function lsSave(rows: ExpenseRow[]): void {
  * True once we've confirmed the DB table exists and is reachable.
  * App.tsx reads this to decide whether to show a setup notice.
  */
-export let DB_READY = false;
-
-/** Errors that mean "schema not set up yet" — not real runtime errors */
-function isSetupError(msg: string): boolean {
-  return (
-    msg.includes('schema cache') ||
-    msg.includes('does not exist') ||
-    msg.includes('relation') ||
-    msg.includes('permission denied') ||
-    msg.includes('JWT') ||
-    msg.includes('not authenticated') ||
-    msg.includes('row-level security')
-  );
-}
+export let DB_READY = true; // Default to true in Node.js backend
 
 function raise(ctx: string, err: { message: string }): never {
   throw new Error(`[expenseApi] ${ctx}: ${err.message}`);
@@ -75,24 +63,12 @@ function raise(ctx: string, err: { message: string }): never {
 
 /* ════════════════════════════════════════════════════════════════
    1. addExpense
-════════════════════════════════════════════════════════════════ */
+   ════════════════════════════════════════════════════════════════ */
 export async function addExpense(
   payload: Pick<ExpenseRow, 'title' | 'amount' | 'category' | 'date'>
 ): Promise<ExpenseRow> {
-  /* ── LocalStorage mode ── */
-  if (!IS_CONFIGURED) {
-    const row: ExpenseRow = {
-      ...payload,
-      id:         crypto.randomUUID(),
-      created_at: new Date().toISOString(),
-      user_id:    'local',
-    };
-    lsSave([row, ...lsLoad()]);
-    return row;
-  }
-
-  /* ── Supabase mode ── */
-  const { data: { user } } = await supabase.auth.getUser();
+  const { data: { user } } = await auth.getUser();
+  
   // If no authenticated user, fall back to LocalStorage (anonymous demo)
   if (!user) {
     const row: ExpenseRow = {
@@ -105,15 +81,17 @@ export async function addExpense(
     return row;
   }
 
-  const { data, error } = await supabase
-    .from('expenses')
-    .insert({ ...payload, user_id: user.id })
-    .select()
-    .single();
-
-  if (error) {
-    if (isSetupError(error.message)) {
-      // DB not ready — fall back silently to LocalStorage
+  /* ── Express/MongoDB mode ── */
+  try {
+    const data = await apiFetch<ExpenseRow>('/expenses', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    DB_READY = true;
+    return data;
+  } catch (error: any) {
+    if (error.message === 'Not authenticated') {
+      // Session expired/unauthenticated - fallback to local storage
       const row: ExpenseRow = {
         ...payload,
         id:         crypto.randomUUID(),
@@ -125,21 +103,21 @@ export async function addExpense(
     }
     raise('addExpense', error);
   }
-  DB_READY = true;
-  return data as ExpenseRow;
 }
 
 /* ════════════════════════════════════════════════════════════════
    2. getExpenses
-════════════════════════════════════════════════════════════════ */
+   ════════════════════════════════════════════════════════════════ */
 export async function getExpenses(opts?: {
   category?: Category;
   from?:     string;
   to?:       string;
   limit?:    number;
 }): Promise<ExpenseRow[]> {
+  const { data: { user } } = await auth.getUser();
+
   /* ── LocalStorage mode ── */
-  if (!IS_CONFIGURED) {
+  if (!user) {
     let rows = lsLoad();
     if (opts?.category) rows = rows.filter((r) => r.category === opts.category);
     if (opts?.from)     rows = rows.filter((r) => r.date >= opts.from!);
@@ -147,22 +125,19 @@ export async function getExpenses(opts?: {
     return rows.slice(0, opts?.limit ?? 500);
   }
 
-  /* ── Supabase mode ── */
-  let query = supabase
-    .from('expenses')
-    .select('*')
-    .order('date',       { ascending: false })
-    .order('created_at', { ascending: false })
-    .limit(opts?.limit ?? 500);
+  /* ── Express/MongoDB mode ── */
+  try {
+    const params = new URLSearchParams();
+    if (opts?.category) params.append('category', opts.category);
+    if (opts?.from)     params.append('from', opts.from);
+    if (opts?.to)       params.append('to', opts.to);
+    if (opts?.limit)    params.append('limit', String(opts.limit));
 
-  if (opts?.category) query = query.eq('category', opts.category);
-  if (opts?.from)     query = query.gte('date', opts.from);
-  if (opts?.to)       query = query.lte('date', opts.to);
-
-  const { data, error } = await query;
-  if (error) {
-    if (isSetupError(error.message)) {
-      // Schema not applied yet — silently serve from LocalStorage
+    const data = await apiFetch<ExpenseRow[]>(`/expenses?${params.toString()}`);
+    DB_READY = true;
+    return data;
+  } catch (error: any) {
+    if (error.message === 'Not authenticated') {
       DB_READY = false;
       let rows = lsLoad();
       if (opts?.category) rows = rows.filter((r) => r.category === opts.category);
@@ -172,19 +147,19 @@ export async function getExpenses(opts?: {
     }
     raise('getExpenses', error);
   }
-  DB_READY = true;
-  return (data ?? []) as ExpenseRow[];
 }
 
 /* ════════════════════════════════════════════════════════════════
    3. updateExpense
-════════════════════════════════════════════════════════════════ */
+   ════════════════════════════════════════════════════════════════ */
 export async function updateExpense(
   id:      string,
   changes: Partial<Pick<ExpenseRow, 'title' | 'amount' | 'category' | 'date'>>
 ): Promise<ExpenseRow> {
+  const { data: { user } } = await auth.getUser();
+
   /* ── LocalStorage mode ── */
-  if (!IS_CONFIGURED) {
+  if (!user) {
     const rows = lsLoad().map((r) => (r.id === id ? { ...r, ...changes } : r));
     lsSave(rows);
     const updated = rows.find((r) => r.id === id);
@@ -192,48 +167,51 @@ export async function updateExpense(
     return updated;
   }
 
-  /* ── Supabase mode ── */
-  const { data, error } = await supabase
-    .from('expenses')
-    .update(changes)
-    .eq('id', id)
-    .select()
-    .single();
-
-  if (error) raise('updateExpense', error);
-  return data as ExpenseRow;
+  /* ── Express/MongoDB mode ── */
+  try {
+    const data = await apiFetch<ExpenseRow>(`/expenses/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(changes),
+    });
+    return data;
+  } catch (error: any) {
+    raise('updateExpense', error);
+  }
 }
 
 /* ════════════════════════════════════════════════════════════════
    4. deleteExpense
-════════════════════════════════════════════════════════════════ */
+   ════════════════════════════════════════════════════════════════ */
 export async function deleteExpense(id: string): Promise<void> {
+  const { data: { user } } = await auth.getUser();
+
   /* ── LocalStorage mode ── */
-  if (!IS_CONFIGURED) {
+  if (!user) {
     lsSave(lsLoad().filter((r) => r.id !== id));
     return;
   }
 
-  /* ── Supabase mode ── */
-  const { error } = await supabase.from('expenses').delete().eq('id', id);
-  if (error) {
-    if (isSetupError(error.message)) {
-      lsSave(lsLoad().filter((r) => r.id !== id));
-      return;
-    }
+  /* ── Express/MongoDB mode ── */
+  try {
+    await apiFetch<void>(`/expenses/${id}`, {
+      method: 'DELETE',
+    });
+  } catch (error: any) {
     raise('deleteExpense', error);
   }
 }
 
 /* ════════════════════════════════════════════════════════════════
-   5. getCategoryTotals — RPC (Supabase) or local aggregation
-════════════════════════════════════════════════════════════════ */
+   5. getCategoryTotals — local aggregation or backend aggregation
+   ════════════════════════════════════════════════════════════════ */
 export async function getCategoryTotals(opts?: {
   from?: string;
   to?:   string;
 }): Promise<CategoryTotal[]> {
+  const { data: { user } } = await auth.getUser();
+
   /* ── LocalStorage mode ── */
-  if (!IS_CONFIGURED) {
+  if (!user) {
     let rows = lsLoad();
     if (opts?.from) rows = rows.filter((r) => r.date >= opts.from!);
     if (opts?.to)   rows = rows.filter((r) => r.date <= opts.to!);
@@ -245,22 +223,27 @@ export async function getCategoryTotals(opts?: {
       .sort((a, b) => b.total - a.total);
   }
 
-  /* ── Supabase mode ── */
-  const params: Record<string, string> = {};
-  if (opts?.from) params['p_from'] = opts.from;
-  if (opts?.to)   params['p_to']   = opts.to;
+  /* ── Express/MongoDB mode ── */
+  try {
+    const params = new URLSearchParams();
+    if (opts?.from) params.append('from', opts.from);
+    if (opts?.to)   params.append('to', opts.to);
 
-  const { data, error } = await supabase.rpc('get_category_totals', params);
-  if (error) raise('getCategoryTotals', error);
-  return (data ?? []) as CategoryTotal[];
+    const data = await apiFetch<CategoryTotal[]>(`/expenses/category-totals?${params.toString()}`);
+    return data;
+  } catch (error: any) {
+    raise('getCategoryTotals', error);
+  }
 }
 
 /* ════════════════════════════════════════════════════════════════
-   6. getMonthlySummary — RPC (Supabase) or local aggregation
-════════════════════════════════════════════════════════════════ */
+   6. getMonthlySummary — local aggregation or backend aggregation
+   ════════════════════════════════════════════════════════════════ */
 export async function getMonthlySummary(): Promise<MonthlySummary> {
+  const { data: { user } } = await auth.getUser();
+
   /* ── LocalStorage mode ── */
-  if (!IS_CONFIGURED) {
+  if (!user) {
     const ym   = new Date().toISOString().slice(0, 7);          // "YYYY-MM"
     const rows = lsLoad().filter((r) => r.date.startsWith(ym));
     const total_spent = rows.reduce((s, r) => s + Number(r.amount), 0);
@@ -269,8 +252,11 @@ export async function getMonthlySummary(): Promise<MonthlySummary> {
     return { total_spent, tx_count, avg_per_day: day > 0 ? total_spent / day : 0 };
   }
 
-  /* ── Supabase mode ── */
-  const { data, error } = await supabase.rpc('get_monthly_summary');
-  if (error) raise('getMonthlySummary', error);
-  return data as MonthlySummary;
+  /* ── Express/MongoDB mode ── */
+  try {
+    const data = await apiFetch<MonthlySummary>('/expenses/monthly-summary');
+    return data;
+  } catch (error: any) {
+    raise('getMonthlySummary', error);
+  }
 }

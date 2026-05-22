@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import type { User } from '@supabase/supabase-js';
+import type { User } from './lib/apiClient';
 import { supabase, IS_CONFIGURED } from './lib/supabaseClient';
 import App from './App';
 import AuthPage from './components/AuthPage';
