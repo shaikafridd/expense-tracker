@@ -1,5 +1,8 @@
 # Sage Wealth 🪙 — Smart Expense Tracker & Alternative Investment Hub
 
+ACKOWLEDGEMENT 
+This Project was developed during a hacathon through collabrative team work. 
+
 Sage Wealth is a premium, high-fidelity financial dashboard built to help users seamlessly log daily expenses, monitor monthly budgets, view deep visual analytics, and simulate investments in high-yield assets, ranging from standard SIPs and ETFs to alternative aviation co-ownership models.
 
 ![Sage Wealth Dashboard Mockup](./dashboard_mockup.png)
